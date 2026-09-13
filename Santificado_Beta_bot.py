@@ -2,6 +2,8 @@ import logging
 import os
 import io
 import urllib.parse
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
 from telegram import Update, constants
@@ -16,6 +18,23 @@ import google.generativeai as genai
 from PIL import Image
 import requests
 
+# Servidor HTTP básico para Render (Web Service Port Binding)
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Santificado Beta Bot is Live!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
 # 1. Variables de entorno
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -27,7 +46,7 @@ logging.basicConfig(
 )
 
 if not TELEGRAM_TOKEN or not GOOGLE_KEY:
-    logging.error("ERROR: Faltan credenciales en el entorno (.env o panel de la nube).")
+    logging.error("ERROR: Faltan credenciales en el entorno.")
     exit(1)
 
 # 2. Inicialización de Gemini 3.8 Flash
@@ -41,12 +60,10 @@ except Exception as e:
     logging.error(f"Error fatal al inicializar Gemini: {e}")
     exit(1)
 
-# Memoria de prompts de estilo por usuario
 user_styles = {}
 
 # 3. Funciones de IA
 def extraer_estilo_base(imagen_bytes):
-    """Fase 1: Extrae la estética y crea el prompt maestro listo para usar."""
     try:
         img = Image.open(io.BytesIO(imagen_bytes))
     except Exception as e:
@@ -68,7 +85,6 @@ def extraer_estilo_base(imagen_bytes):
         return f"Error Gemini: {e}"
 
 def describir_sujeto_destino(imagen_bytes):
-    """Fase 2: Extrae únicamente la estructura física de la imagen a transformar."""
     try:
         img = Image.open(io.BytesIO(imagen_bytes))
     except Exception as e:
@@ -89,7 +105,6 @@ def describir_sujeto_destino(imagen_bytes):
         return f"Error Gemini: {e}"
 
 def renderizar_fusion(sujeto, estilo):
-    """Generación final en Pollinations (Flux)."""
     prompt_final = f"{sujeto}, {estilo}, highly detailed, cinematic lighting, edge-to-edge full scene composition, masterpiece"
     prompt_encoded = urllib.parse.quote(prompt_final)
     url = f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=1024&height=1024&nologo=true&model=flux"
@@ -110,7 +125,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🕊️ **Santificado Beta Bot**\n\n"
         "**Flujo de trabajo:**\n"
         "1. Envía una imagen de referencia para extraer su prompt de estilo.\n"
-        "2. Recibirás el prompt listo para usar en cualquier plataforma.\n"
+        "2. Recibirás el prompt maestro listo para usar en cualquier plataforma.\n"
         "3. Envía la imagen base que quieres transformar.\n\n"
         "Envía la primera foto para comenzar."
     )
@@ -127,7 +142,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file = await message.photo[-1].get_file()
     photo_bytes = await photo_file.download_as_bytearray()
 
-    # PASO 1: Extracción del prompt de estilo
     if user_id not in user_styles:
         status_msg = await message.reply_text("🔍 Analizando estilo y generando prompt maestro con Gemini 3.8 Flash...")
         prompt_estilo = extraer_estilo_base(photo_bytes)
@@ -146,7 +160,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await status_msg.edit_text(texto_respuesta, parse_mode=constants.ParseMode.MARKDOWN)
 
-    # PASO 2: Transformación estructural
     else:
         estilo_activo = user_styles[user_id]
         status_msg = await message.reply_text("⏳ Analizando composición base y aplicando estilo...")
@@ -176,6 +189,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 5. Arranque
 if __name__ == "__main__":
+    # Iniciar servidor web en un hilo secundario para el puerto de Render
+    web_thread = Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset_cmd))
